@@ -92,13 +92,9 @@ export default function CartDrawer() {
       setAddress("");
       setPincode("");
 
-      // Redirect user to WhatsApp Click-to-Chat URL
+      // Redirect user to WhatsApp Click-to-Chat URL (opens app directly, bypasses popup blocker)
       if (typeof window !== "undefined") {
-        const opened = window.open(data.whatsappUrl, "_blank");
-        if (!opened) {
-          // Fallback if popup blocker hits
-          window.location.href = data.whatsappUrl;
-        }
+        window.location.href = data.whatsappUrl;
       }
     } catch (err: any) {
       console.error("Checkout failed:", err);

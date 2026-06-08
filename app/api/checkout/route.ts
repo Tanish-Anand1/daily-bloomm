@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import fs from "fs/promises";
-import path from "path";
-import { products } from "@/lib/data";
+import { getProducts, saveOrder } from "@/lib/storage";
+
+export const dynamic = "force-dynamic";
 
 // Type definitions for checkout
 interface OrderItem {
@@ -20,9 +20,6 @@ interface CheckoutRequest {
   items: OrderItem[];
   customer: CustomerDetails;
 }
-
-const ORDERS_FILE_PATH = path.join(process.cwd(), "orders.json");
-const PRODUCTS_FILE_PATH = path.join(process.cwd(), "products.json");
 
 export async function POST(request: Request) {
   try {
@@ -63,19 +60,22 @@ export async function POST(request: Request) {
     }
 
     // 2. Server-side Price Verification (Loophole protection against price-tampering)
-    let currentProducts = products;
+    let currentProducts = [];
     try {
-      const prodData = await fs.readFile(PRODUCTS_FILE_PATH, "utf-8");
-      currentProducts = JSON.parse(prodData);
+      currentProducts = await getProducts();
     } catch (err) {
-      console.warn("Failed to read products.json in checkout, using fallback data.");
+      console.error("Failed to read products in checkout:", err);
+      return NextResponse.json(
+        { success: false, error: "Failed to read products database." },
+        { status: 500 }
+      );
     }
 
     let subtotal = 0;
     const verifiedItems = [];
 
     for (const item of items) {
-      // Find item in server data
+      // Find item in database
       const dbProduct = currentProducts.find((p) => p.id === item.id);
       if (!dbProduct) {
         return NextResponse.json(
@@ -113,7 +113,7 @@ export async function POST(request: Request) {
     const randomNum = Math.floor(1000 + Math.random() * 9000);
     const orderId = `#DB-${year}-${randomNum}`;
 
-    // 4. Persistent Database Logging (orders.json)
+    // 4. Persistent Database Logging
     const orderRecord = {
       orderId,
       timestamp: new Date().toISOString(),
@@ -132,17 +132,15 @@ export async function POST(request: Request) {
       status: "pending_whatsapp",
     };
 
-    let existingOrders = [];
     try {
-      const fileData = await fs.readFile(ORDERS_FILE_PATH, "utf-8");
-      existingOrders = JSON.parse(fileData);
-    } catch (readError: any) {
-      // If file doesn't exist or is invalid, start clean
-      existingOrders = [];
+      await saveOrder(orderRecord);
+    } catch (err) {
+      console.error("Failed to save order to storage:", err);
+      return NextResponse.json(
+        { success: false, error: "Failed to save your order on the server." },
+        { status: 500 }
+      );
     }
-
-    existingOrders.push(orderRecord);
-    await fs.writeFile(ORDERS_FILE_PATH, JSON.stringify(existingOrders, null, 2), "utf-8");
 
     // 5. Construct Encoded WhatsApp Message
     const brandWhatsAppNumber = "919838070818"; // Daily Bloomm official WhatsApp Order Handoff number
@@ -171,7 +169,7 @@ export async function POST(request: Request) {
     message += `Please confirm this order to proceed with packaging and dispatch. Thank you!`;
 
     const encodedMessage = encodeURIComponent(message);
-    const whatsappUrl = `https://api.whatsapp.com/send?phone=${brandWhatsAppNumber}&text=${encodedMessage}`;
+    const whatsappUrl = `https://wa.me/${brandWhatsAppNumber}?text=${encodedMessage}`;
 
     // Return the link and ID to frontend
     return NextResponse.json({
