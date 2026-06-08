@@ -1,30 +1,49 @@
+import { createClient } from "redis";
 import fs from "fs/promises";
 import path from "path";
 import { products as initialProducts } from "./data";
-import { kv } from "@vercel/kv";
 
 const PRODUCTS_FILE_PATH = path.join(process.cwd(), "products.json");
 const ORDERS_FILE_PATH = path.join(process.cwd(), "orders.json");
 
-const isKvEnabled = !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
+let redisClient: any = null;
+
+async function getRedisClient() {
+  const url = process.env.REDIS_URL;
+  if (!url) return null;
+
+  try {
+    if (!redisClient) {
+      redisClient = createClient({ url });
+      redisClient.on("error", (err: any) => console.error("Redis client error:", err));
+      await redisClient.connect();
+    } else if (!redisClient.isOpen) {
+      await redisClient.connect();
+    }
+    return redisClient;
+  } catch (err) {
+    console.error("Failed to connect to Redis:", err);
+    return null;
+  }
+}
 
 export async function getProducts(): Promise<any[]> {
-  if (isKvEnabled) {
+  const redis = await getRedisClient();
+  if (redis) {
     try {
-      const data = await kv.get<any[]>("products");
-      if (data && Array.isArray(data)) {
-        return data;
+      const data = await redis.get("products");
+      if (data) {
+        return JSON.parse(data);
       }
-      // If KV is empty or not seeded, write initial list and return it
-      await kv.set("products", initialProducts);
+      // Seed Redis with initial products if it's empty
+      await redis.set("products", JSON.stringify(initialProducts));
       return initialProducts;
     } catch (err) {
-      console.error("Vercel KV read products error:", err);
-      // Fallback to file system below
+      console.error("Redis getProducts error:", err);
     }
   }
 
-  // Fallback to file system
+  // Fallback to local file system
   try {
     const fileData = await fs.readFile(PRODUCTS_FILE_PATH, "utf-8");
     return JSON.parse(fileData);
@@ -39,35 +58,36 @@ export async function getProducts(): Promise<any[]> {
 }
 
 export async function saveProducts(productsList: any[]): Promise<void> {
-  if (isKvEnabled) {
+  const redis = await getRedisClient();
+  if (redis) {
     try {
-      await kv.set("products", productsList);
+      await redis.set("products", JSON.stringify(productsList));
       return;
     } catch (err) {
-      console.error("Vercel KV save products error:", err);
+      console.error("Redis saveProducts error:", err);
       throw new Error("Failed to save products to database.");
     }
   }
 
-  // Fallback to file system
+  // Fallback to local file system
   await fs.writeFile(PRODUCTS_FILE_PATH, JSON.stringify(productsList, null, 2), "utf-8");
 }
 
 export async function getOrders(): Promise<any[]> {
-  if (isKvEnabled) {
+  const redis = await getRedisClient();
+  if (redis) {
     try {
-      const data = await kv.get<any[]>("orders");
-      if (data && Array.isArray(data)) {
-        return data;
+      const data = await redis.get("orders");
+      if (data) {
+        return JSON.parse(data);
       }
       return [];
     } catch (err) {
-      console.error("Vercel KV read orders error:", err);
-      // Fallback to file system below
+      console.error("Redis getOrders error:", err);
     }
   }
 
-  // Fallback to file system
+  // Fallback to local file system
   try {
     const fileData = await fs.readFile(ORDERS_FILE_PATH, "utf-8");
     return JSON.parse(fileData);
@@ -77,19 +97,20 @@ export async function getOrders(): Promise<any[]> {
 }
 
 export async function saveOrder(orderRecord: any): Promise<void> {
-  if (isKvEnabled) {
+  const redis = await getRedisClient();
+  if (redis) {
     try {
       const existing = await getOrders();
       existing.push(orderRecord);
-      await kv.set("orders", existing);
+      await redis.set("orders", JSON.stringify(existing));
       return;
     } catch (err) {
-      console.error("Vercel KV save order error:", err);
+      console.error("Redis saveOrder error:", err);
       throw new Error("Failed to save order to database.");
     }
   }
 
-  // Fallback to file system
+  // Fallback to local file system
   const existingOrders = await getOrders();
   existingOrders.push(orderRecord);
   await fs.writeFile(ORDERS_FILE_PATH, JSON.stringify(existingOrders, null, 2), "utf-8");
