@@ -6,40 +6,56 @@ import { products as initialProducts } from "./data";
 const PRODUCTS_FILE_PATH = path.join(process.cwd(), "products.json");
 const ORDERS_FILE_PATH = path.join(process.cwd(), "orders.json");
 
-let redisClient: any = null;
-
-async function getRedisClient() {
+// Helper to run operations with a short-lived Redis connection.
+// This is critical for serverless environments (like Vercel) where idle TCP sockets 
+// are silently dropped, causing ConnectionTimeoutError or ECONNRESET on reuse.
+async function runWithRedis<T>(operation: (client: any) => Promise<T>): Promise<T | null> {
   const url = process.env.REDIS_URL;
   if (!url) return null;
 
-  try {
-    if (!redisClient) {
-      redisClient = createClient({ url });
-      redisClient.on("error", (err: any) => console.error("Redis client error:", err));
-      await redisClient.connect();
-    } else if (!redisClient.isOpen) {
-      await redisClient.connect();
+  const client = createClient({
+    url,
+    socket: {
+      connectTimeout: 5000, // 5s connection timeout
+      keepAlive: 1000,      // enable socket keep-alive
     }
-    return redisClient;
+  });
+
+  client.on("error", (err: any) => console.error("Redis client error:", err));
+
+  try {
+    await client.connect();
+    const result = await operation(client);
+    await client.disconnect();
+    return result;
   } catch (err) {
-    console.error("Failed to connect to Redis:", err);
+    console.error("Failed to run Redis operation:", err);
+    try {
+      await client.disconnect();
+    } catch (_) {}
     return null;
   }
 }
 
 export async function getProducts(): Promise<any[]> {
-  const redis = await getRedisClient();
-  if (redis) {
-    try {
-      const data = await redis.get("products");
-      if (data) {
+  const url = process.env.REDIS_URL;
+  if (url) {
+    const data = await runWithRedis(async (client) => {
+      return await client.get("products");
+    });
+
+    if (data) {
+      try {
         return JSON.parse(data);
+      } catch (e) {
+        console.error("Redis getProducts JSON parse error:", e);
       }
-      // Seed Redis with initial products if it's empty
-      await redis.set("products", JSON.stringify(initialProducts));
+    } else if (data === null) {
+      // If connected to Redis but key doesn't exist, seed it
+      await runWithRedis(async (client) => {
+        await client.set("products", JSON.stringify(initialProducts));
+      });
       return initialProducts;
-    } catch (err) {
-      console.error("Redis getProducts error:", err);
     }
   }
 
@@ -58,15 +74,14 @@ export async function getProducts(): Promise<any[]> {
 }
 
 export async function saveProducts(productsList: any[]): Promise<void> {
-  const redis = await getRedisClient();
-  if (redis) {
-    try {
-      await redis.set("products", JSON.stringify(productsList));
-      return;
-    } catch (err) {
-      console.error("Redis saveProducts error:", err);
-      throw new Error("Failed to save products to database.");
-    }
+  const url = process.env.REDIS_URL;
+  if (url) {
+    const success = await runWithRedis(async (client) => {
+      await client.set("products", JSON.stringify(productsList));
+      return true;
+    });
+    if (success) return;
+    throw new Error("Failed to save products to Redis database.");
   }
 
   // Fallback to local file system
@@ -74,16 +89,18 @@ export async function saveProducts(productsList: any[]): Promise<void> {
 }
 
 export async function getOrders(): Promise<any[]> {
-  const redis = await getRedisClient();
-  if (redis) {
-    try {
-      const data = await redis.get("orders");
-      if (data) {
+  const url = process.env.REDIS_URL;
+  if (url) {
+    const data = await runWithRedis(async (client) => {
+      return await client.get("orders");
+    });
+
+    if (data) {
+      try {
         return JSON.parse(data);
+      } catch (e) {
+        console.error("Redis getOrders JSON parse error:", e);
       }
-      return [];
-    } catch (err) {
-      console.error("Redis getOrders error:", err);
     }
   }
 
@@ -97,17 +114,17 @@ export async function getOrders(): Promise<any[]> {
 }
 
 export async function saveOrder(orderRecord: any): Promise<void> {
-  const redis = await getRedisClient();
-  if (redis) {
-    try {
-      const existing = await getOrders();
+  const url = process.env.REDIS_URL;
+  if (url) {
+    const success = await runWithRedis(async (client) => {
+      const existingData = await client.get("orders");
+      const existing = existingData ? JSON.parse(existingData) : [];
       existing.push(orderRecord);
-      await redis.set("orders", JSON.stringify(existing));
-      return;
-    } catch (err) {
-      console.error("Redis saveOrder error:", err);
-      throw new Error("Failed to save order to database.");
-    }
+      await client.set("orders", JSON.stringify(existing));
+      return true;
+    });
+    if (success) return;
+    throw new Error("Failed to save order to Redis database.");
   }
 
   // Fallback to local file system
